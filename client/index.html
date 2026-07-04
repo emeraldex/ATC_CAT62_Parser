@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Radar CAT62 Parser - Live Tracking</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1>🛩️ Radar CAT62 ASTERIX Parser</h1>
+                <div class="status-indicator">
+                    <span id="connection-status" class="status-dot disconnected"></span>
+                    <span id="connection-text">Connecting...</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Map -->
+            <div class="map-container">
+                <div id="map"></div>
+            </div>
+
+            <!-- Control Panel -->
+            <aside class="control-panel">
+                <!-- Status Card -->
+                <div class="card">
+                    <h2>Connection Status</h2>
+                    <div class="status-details">
+                        <div class="status-item">
+                            <span class="label">Status:</span>
+                            <span id="status-value" class="value">Disconnected</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="label">Tracks:</span>
+                            <span id="track-count" class="value">0</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="label">Messages:</span>
+                            <span id="message-count" class="value">0</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Statistics Card -->
+                <div class="card">
+                    <h2>Statistics</h2>
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <span class="stat-label">Avg Speed</span>
+                            <span class="stat-value" id="avg-speed">--</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Max Speed</span>
+                            <span class="stat-value" id="max-speed">--</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Success Rate</span>
+                            <span class="stat-value" id="success-rate">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Track List Card -->
+                <div class="card">
+                    <h2>Active Tracks</h2>
+                    <div class="track-list" id="track-list">
+                        <p class="empty-message">No tracks</p>
+                    </div>
+                </div>
+
+                <!-- Controls Card -->
+                <div class="card">
+                    <h2>Controls</h2>
+                    <div class="controls">
+                        <button id="clear-btn" class="btn btn-secondary">Clear Tracks</button>
+                        <button id="refresh-btn" class="btn btn-secondary">Refresh Stats</button>
+                    </div>
+                </div>
+
+                <!-- Info Card -->
+                <div class="card info-card">
+                    <h3>ℹ️ Info</h3>
+                    <p>Real-time radar tracking using CAT62 ASTERIX protocol. Displays active aircraft tracks with position, speed, and heading data.</p>
+                    <p><a href="/api/health" target="_blank">API Health</a> | 
+                       <a href="/api/stats" target="_blank">Statistics API</a></p>
+                </div>
+            </aside>
+        </div>
+
+        <!-- Toast Notifications -->
+        <div id="toast-container" class="toast-container"></div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

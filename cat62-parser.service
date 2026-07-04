@@ -1,0 +1,30 @@
+[Unit]
+Description=Radar CAT62 ASTERIX Parser
+Documentation=http://localhost:7878
+After=network.target
+
+[Service]
+Type=simple
+User=radar
+Group=radar
+WorkingDirectory=/opt/cat62-parser
+ExecStart=/opt/cat62-parser/venv/bin/python parser_server.py --udp 0.0.0.0:31002
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/cat62-parser/client
+
+# Resource limits
+MemoryLimit=512M
+CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target
