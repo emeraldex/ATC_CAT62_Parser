@@ -7,6 +7,7 @@ suitable for testing the parser with the --pcap option.
 """
 import struct
 import time
+import math
 import io
 from pathlib import Path
 
@@ -95,7 +96,16 @@ def create_eth_frame(payload):
 
 
 def create_cat62_record(track_id, latitude, longitude, speed, heading):
-    """Create a CAT62 record with track data"""
+    """Create a CAT62 record with track data
+    
+    FSPEC format:
+    Octet 1: bit 7=I062/010, bit 6=I062/015, bit 5=I062/020, bit 4=I062/040, 
+             bit 3=I062/060, bit 2=I062/070, bit 1=I062/080, bit 0=FX
+    Octet 2: bit 7=I062/090, bit 6=I062/100, bit 5=I062/105, bit 4=I062/110,
+             bit 3=I062/120, bit 2=I062/135, bit 1=I062/136, bit 0=FX
+    Octet 3: bit 7=I062/185, bit 6=I062/200, bit 5=I062/210, bit 4=I062/220,
+             bit 3=I062/245, bit 2=I062/270, bit 1=I062/300, bit 0=FX
+    """
     record = bytearray()
     record.append(62)  # Category
     
@@ -103,32 +113,44 @@ def create_cat62_record(track_id, latitude, longitude, speed, heading):
     length_offset = len(record)
     record.extend([0, 0])
     
-    # FSPEC: I062/010, I062/040, I062/105, I062/060, I062/400
-    record.append(0xF8)  # 11111000 - 5 fields + extension
+    # FSPEC: We need I062/010 (bit 7), I062/040 (bit 4), I062/105 (octet2 bit 5), I062/185 (octet3 bit 7)
+    # Octet 1: 10010001 = 0x91 (I062/010 + I062/040 + FX for extension)
+    # Octet 2: 00100001 = 0x21 (I062/105 + FX for extension)
+    # Octet 3: 10000000 = 0x80 (I062/185, no FX)
+    record.append(0x91)  # Octet 1: I062/010, I062/040, FX
+    record.append(0x21)  # Octet 2: I062/105, FX
+    record.append(0x80)  # Octet 3: I062/185, no extension
     
-    # I062/010 (SAC/SIC)
+    # I062/010 (SAC/SIC) - 2 bytes
     record.append(0)  # SAC
     record.append(10)  # SIC
     
-    # I062/040 (Track number)
+    # I062/040 (Track number) - 2 bytes (12 bits in upper bits)
     tn = (track_id & 0x0FFF)
-    record.extend(struct.pack('>H', tn << 4))  # 12 bits, padded
+    record.extend(struct.pack('>H', tn << 4))
     
-    # I062/105 (Position - WGS84)
-    lat_lsb = latitude / (180.0 / (1 << 23))  # Convert to LSB
-    lon_lsb = longitude / (180.0 / (1 << 23))
-    record.extend(struct.pack('>i', int(lat_lsb)))  # Signed 32-bit
-    record.extend(struct.pack('>i', int(lon_lsb)))
+    # I062/105 (Position - WGS84) - 8 bytes (2x 4-byte signed)
+    lat_lsb = int(latitude / (180.0 / (1 << 23)))
+    lon_lsb = int(longitude / (180.0 / (1 << 23)))
+    record.extend(struct.pack('>i', lat_lsb))  # Latitude as signed int32
+    record.extend(struct.pack('>i', lon_lsb))  # Longitude as signed int32
     
-    # I062/060 (Track mode 3/A code)
-    code_octal = 1234
-    record.extend(struct.pack('>H', code_octal))
-    
-    # I062/400 (Speed/Heading)
-    speed_lsb = int(speed / 0.1953125)  # ~0.5 knots per LSB
-    heading_lsb = int((heading % 360) / (360.0 / 512))  # 512 values in 360°
-    record.extend(struct.pack('>H', speed_lsb & 0xFFF))  # 12 bits
-    record.extend(struct.pack('>H', heading_lsb & 0x1FF))  # 9 bits
+    # I062/185 (Calculated Track Velocity Cartesian) - 4 bytes
+    # Vx and Vy are signed 16-bit integers, each representing m/s with 0.25 m/s per LSB
+    # Convert speed (knots) and heading (degrees) to Vx, Vy
+    speed_ms = speed * 0.51444  # Convert knots to m/s
+    heading_rad = math.radians(heading)
+    # Vy = speed * cos(heading), Vx = speed * sin(heading)
+    vy_ms = speed_ms * math.cos(heading_rad)
+    vx_ms = speed_ms * math.sin(heading_rad)
+    # Scale to LSB: 0.25 m/s per LSB, so divide by 0.25 (or multiply by 4)
+    vx_lsb = int(round(vx_ms / 0.25))
+    vy_lsb = int(round(vy_ms / 0.25))
+    # Clamp to 16-bit signed range
+    vx_lsb = max(-32768, min(32767, vx_lsb))
+    vy_lsb = max(-32768, min(32767, vy_lsb))
+    record.extend(struct.pack('>h', vx_lsb))
+    record.extend(struct.pack('>h', vy_lsb))
     
     # Update length
     record_length = len(record)
