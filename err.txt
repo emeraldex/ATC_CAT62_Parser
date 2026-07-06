@@ -1,0 +1,16 @@
+2026-07-06 10:53:58 [INFO] CAT62Parser: Radar CAT62 Parser starting...
+2026-07-06 10:53:58 [INFO] CAT62Parser: Starting PCAP playback from sample_radar.pcap
+2026-07-06 10:53:58 [INFO] CAT62Parser: WebSocket server on ws://0.0.0.0:8765
+2026-07-06 10:53:58 [INFO] CAT62Parser: HTTP server on http://0.0.0.0:7878
+2026-07-06 10:54:48 [ERROR] asyncio: Task exception was never retrieved
+future: <Task finished name='Task-2' coro=<ws_server() done, defined at C:\Users\azlan\OneDrive\Special Project\ATC CAT62 Parser\ATC_CAT62_Parser\parser_server.py:530> exception=OSError(10048, "error while attempting to bind on address ('0.0.0.0', 8765): only one usage of each socket address (protocol/network address/port) is normally permitted")>
+Traceback (most recent call last):
+  File "C:\Users\azlan\OneDrive\Special Project\ATC CAT62 Parser\ATC_CAT62_Parser\parser_server.py", line 542, in ws_server
+    return await websockets.serve(handler, '0.0.0.0', WS_PORT)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\site-packages\websockets\asyncio\server.py", line 847, in __await_impl__
+    server = await self.create_server
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python312\Lib\asyncio\base_events.py", line 1559, in create_server
+    raise OSError(err.errno, 'error while attempting '
+OSError: [Errno 10048] error while attempting to bind on address ('0.0.0.0', 8765): only one usage of each socket address (protocol/network address/port) is normally permitted
