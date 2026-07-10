@@ -1,5 +1,4 @@
-version: '3.8'
-
+# Compose v2 (the top-level `version:` key is obsolete and intentionally omitted).
 services:
   cat62-parser:
     build:
@@ -7,48 +6,47 @@ services:
       dockerfile: Dockerfile
     container_name: cat62-parser
     restart: unless-stopped
-    
+
     # Port mappings
     ports:
-      - "7878:7878"     # HTTP web UI
-      - "8765:8765"     # WebSocket
+      - "7878:7878"        # HTTP web UI + API
+      - "8765:8765"        # WebSocket
       - "31002:31002/udp"  # Radar UDP input
-    
-    # Environment variables
+
+    # LOG_LEVEL is honored by the app (see logging setup in parser_server.py).
     environment:
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
-    
-    # Resource limits
-    resources:
-      limits:
-        cpus: '1'
-        memory: 512M
-      reservations:
-        cpus: '0.5'
-        memory: 256M
-    
-    # Volumes
+
+    # Resource limits. Under `deploy.resources`, Compose v2 (`docker compose up`)
+    # enforces these; the previous top-level `resources:` key was silently ignored.
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+    # The client is baked into the image; mount it read-only only to override
+    # in dev. (No /app/logs mount: the app logs to stdout -> the json-file driver.)
     volumes:
       - ./client:/app/client:ro
-      - /var/log/cat62:/app/logs
-    
-    # Health check
+
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7878/api/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:7878/api/health').status==200 else 1)"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 5s
-    
-    # Logging
+
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-    
-    # Network
+
     networks:
       - radar-network
 

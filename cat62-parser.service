@@ -9,9 +9,13 @@ User=radar
 Group=radar
 WorkingDirectory=/opt/cat62-parser
 ExecStart=/opt/cat62-parser/venv/bin/python parser_server.py --udp 0.0.0.0:31002
-ExecReload=/bin/kill -HUP $MAINPID
+# No ExecReload: there is no reloadable config and the app does not handle
+# SIGHUP (default action would terminate it). Use `systemctl restart` instead.
+# On stop, systemd sends SIGTERM, which the app now handles for graceful shutdown.
 Restart=on-failure
 RestartSec=10
+# Give the app time to close sockets/WS cleanly on stop.
+TimeoutStopSec=10
 StandardOutput=journal
 StandardError=journal
 
@@ -22,8 +26,8 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/cat62-parser/client
 
-# Resource limits
-MemoryLimit=512M
+# Resource limits (cgroup v2 names)
+MemoryMax=512M
 CPUQuota=80%
 
 [Install]

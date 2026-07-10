@@ -1,31 +1,93 @@
 // Radar CAT62 Parser - Frontend Application
-// Real-time track visualization and monitoring
+// Real-time track visualization and monitoring.
+//
+// Protocol note: the server pushes ONE message per track update, shaped like
+//   { type:'track', ts, src:{sac,sic}, tn, pos:{lat,lon}, gs, hdg, id, addr, m3a }
+// plus periodic { type:'stats', data:{...} }. This client keys tracks the same
+// way the server does (derive_track_id) and culls them on a wall-clock timer.
+
+const STALE_MS = 30000;          // drop a track after 30s with no update
+const RECONNECT_MS = 3000;
 
 class RadarClient {
     constructor() {
         this.ws = null;
         this.map = null;
         this.markers = new Map();
-        this.tracks = new Map();
-        this.stats = { messages: 0, parsed: 0, failed: 0, speeds: [], headings: [] };
-        
+        this.tracks = new Map();     // key -> { ...msg, _lastSeen }
+        this.config = { ws_port: 8765, tile_url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png' };
         this.init();
     }
 
-    init() {
+    async init() {
+        await this.loadConfig();
         this.setupMap();
         this.setupEventListeners();
         this.connect();
+        // Wall-clock staleness sweep (independent of server push cadence).
+        setInterval(() => this.cullStale(), 2000);
+    }
+
+    async loadConfig() {
+        try {
+            const r = await fetch('/api/config');
+            if (r.ok) this.config = Object.assign(this.config, await r.json());
+        } catch (e) {
+            console.warn('Could not load /api/config; using defaults', e);
+        }
+    }
+
+    // --- Track identity: mirror the server's derive_track_id ------------------
+    static keyOf(t) {
+        if (t.id) return String(t.id);
+        if (t.addr) return String(t.addr);
+        const s = t.src || {};
+        return `${s.sac ?? '?'}.${s.sic ?? '?'}.${t.tn ?? '?'}`;
     }
 
     setupMap() {
-        // Initialize Leaflet map
         this.map = L.map('map').setView([51.5074, -0.1278], 6);
-        
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        // Graceful basemap: try the configured tiles; if they fail to load
+        // (e.g. air-gapped ops room), fall back to a plain graticule so markers
+        // stay usable.
+        const layer = L.tileLayer(this.config.tile_url, {
             attribution: '© OpenStreetMap contributors',
-            maxZoom: 19
-        }).addTo(this.map);
+            maxZoom: 19,
+        });
+        let tileErrors = 0;
+        layer.on('tileerror', () => {
+            tileErrors += 1;
+            if (tileErrors === 1) {
+                console.warn('Map tiles unavailable; using offline graticule fallback');
+                this.map.removeLayer(layer);
+                this.enableGraticuleFallback();
+                this.showToast('Map tiles offline — using coordinate grid', 'warning');
+            }
+        });
+        layer.addTo(this.map);
+    }
+
+    // Draw a lon/lat grid directly on the map so operators still get spatial
+    // reference with no tile server reachable.
+    enableGraticuleFallback() {
+        document.getElementById('map').classList.add('offline-basemap');
+        const draw = () => {
+            if (this._grid) this._grid.forEach(l => this.map.removeLayer(l));
+            this._grid = [];
+            const b = this.map.getBounds();
+            const step = 1; // degrees
+            const fl = (x) => Math.floor(x / step) * step;
+            for (let lon = fl(b.getWest()); lon <= b.getEast(); lon += step) {
+                this._grid.push(L.polyline([[b.getSouth(), lon], [b.getNorth(), lon]],
+                    { color: '#2b4a63', weight: 0.5, interactive: false }).addTo(this.map));
+            }
+            for (let lat = fl(b.getSouth()); lat <= b.getNorth(); lat += step) {
+                this._grid.push(L.polyline([[lat, b.getWest()], [lat, b.getEast()]],
+                    { color: '#2b4a63', weight: 0.5, interactive: false }).addTo(this.map));
+            }
+        };
+        draw();
+        this.map.on('moveend zoomend', draw);
     }
 
     setupEventListeners() {
@@ -34,10 +96,16 @@ class RadarClient {
     }
 
     connect() {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${proto}//${window.location.hostname}:${this.config.ws_port}`;
 
-        this.ws = new WebSocket(wsUrl);
+        try {
+            this.ws = new WebSocket(wsUrl);
+        } catch (e) {
+            console.error('WebSocket construction failed:', e);
+            setTimeout(() => this.connect(), RECONNECT_MS);
+            return;
+        }
 
         this.ws.onopen = () => {
             this.setConnectionStatus(true);
@@ -45,167 +113,141 @@ class RadarClient {
         };
 
         this.ws.onmessage = (event) => {
+            let data;
             try {
-                const data = JSON.parse(event.data);
-                this.handleMessage(data);
+                data = JSON.parse(event.data);
             } catch (e) {
                 console.error('Failed to parse message:', e);
+                return;
             }
+            this.handleMessage(data);
         };
 
-        this.ws.onerror = (error) => {
-            console.error('WebSocket error:', error);
-            this.showToast('Connection error', 'error');
+        this.ws.onerror = () => {
+            // onclose fires next and handles reconnect; avoid duplicate toasts.
+            this.setConnectionStatus(false);
         };
 
         this.ws.onclose = () => {
             this.setConnectionStatus(false);
-            this.showToast('Disconnected from server', 'warning');
-            // Attempt to reconnect after 3 seconds
-            setTimeout(() => this.connect(), 3000);
+            setTimeout(() => this.connect(), RECONNECT_MS);
         };
     }
 
     handleMessage(data) {
-        if (data.type === 'tracks') {
-            this.updateTracks(data.data);
+        if (data.type === 'track') {
+            this.updateTrack(data);
         } else if (data.type === 'stats') {
-            this.updateStats(data.data);
+            this.updateStats(data.data || {});
         }
     }
 
-    updateTracks(tracksData) {
-        if (!Array.isArray(tracksData)) return;
+    updateTrack(msg) {
+        const lat = msg.pos && msg.pos.lat;
+        const lon = msg.pos && msg.pos.lon;
+        if (typeof lat !== 'number' || typeof lon !== 'number') return; // need a position to plot
 
-        const now = Date.now();
-
-        tracksData.forEach(track => {
-            const trackId = track.track_id;
-            
-            if (track.pos_lat !== null && track.pos_lon !== null) {
-                this.tracks.set(trackId, track);
-                this.updateMarker(trackId, track);
-            }
-        });
-
-        // Remove stale markers (older than 60 seconds)
-        this.markers.forEach((marker, trackId) => {
-            if (!this.tracks.has(trackId)) {
-                this.map.removeLayer(marker);
-                this.markers.delete(trackId);
-            }
-        });
-
+        const key = RadarClient.keyOf(msg);
+        msg._lastSeen = Date.now();
+        this.tracks.set(key, msg);
+        this.updateMarker(key, msg, lat, lon);
         this.updateTrackList();
         document.getElementById('track-count').textContent = this.tracks.size;
     }
 
-    updateMarker(trackId, track) {
-        const lat = track.pos_lat;
-        const lon = track.pos_lon;
-        const speed = track.ground_speed || 0;
-        const heading = track.heading || 0;
+    cullStale() {
+        const now = Date.now();
+        let changed = false;
+        for (const [key, t] of this.tracks) {
+            if (now - t._lastSeen > STALE_MS) {
+                this.tracks.delete(key);
+                const m = this.markers.get(key);
+                if (m) { this.map.removeLayer(m); this.markers.delete(key); }
+                changed = true;
+            }
+        }
+        if (changed) {
+            this.updateTrackList();
+            document.getElementById('track-count').textContent = this.tracks.size;
+        }
+    }
 
-        let marker = this.markers.get(trackId);
-
+    updateMarker(key, track, lat, lon) {
+        const heading = track.hdg || 0;
+        let marker = this.markers.get(key);
         if (!marker) {
-            // Create new marker
-            const icon = this.createTrackIcon(heading);
-            marker = L.marker([lat, lon], { icon: icon })
-                .bindPopup(this.createPopup(track))
+            marker = L.marker([lat, lon], { icon: this.createTrackIcon(heading) })
+                .bindPopup(this.createPopup(key, track))
                 .addTo(this.map);
-            this.markers.set(trackId, marker);
+            this.markers.set(key, marker);
         } else {
-            // Update existing marker
             marker.setLatLng([lat, lon]);
             marker.setIcon(this.createTrackIcon(heading));
-            marker.setPopupContent(this.createPopup(track));
+            marker.setPopupContent(this.createPopup(key, track));
         }
     }
 
     createTrackIcon(heading) {
-        const rotatedHeading = (heading + 90) % 360;
-        const html = `<div style="transform: rotate(${rotatedHeading}deg); font-size: 24px;">✈️</div>`;
-        
-        return L.divIcon({
-            html: html,
-            iconSize: [32, 32],
-            className: 'track-marker'
-        });
+        const rotated = (heading + 90) % 360;
+        const html = `<div style="transform: rotate(${rotated}deg); font-size: 24px;">✈️</div>`;
+        return L.divIcon({ html, iconSize: [32, 32], className: 'track-marker' });
     }
 
-    createPopup(track) {
-        const speed = track.ground_speed ? track.ground_speed.toFixed(1) : '--';
-        const heading = track.heading ? track.heading.toFixed(0) : '--';
-        const altitude = track.altitude ? track.altitude.toFixed(0) : '--';
-
+    createPopup(key, track) {
+        const speed = typeof track.gs === 'number' ? track.gs.toFixed(1) : '--';
+        const heading = typeof track.hdg === 'number' ? track.hdg.toFixed(0) : '--';
+        const updated = track.ts ? new Date(track.ts * 1000).toLocaleTimeString() : '--';
         return `
             <div class="track-popup">
-                <strong>${track.track_id}</strong><br>
+                <strong>${key}</strong><br>
                 Speed: ${speed} kt<br>
                 Heading: ${heading}°<br>
-                Altitude: ${altitude} ft<br>
-                Updated: ${new Date(track.timestamp * 1000).toLocaleTimeString()}
+                Updated: ${updated}
             </div>
         `;
     }
 
     updateTrackList() {
         const list = document.getElementById('track-list');
-        const tracks = Array.from(this.tracks.values()).slice(0, 10);
-
+        const tracks = Array.from(this.tracks.entries()).slice(0, 12);
         if (tracks.length === 0) {
             list.innerHTML = '<p class="empty-message">No tracks</p>';
             return;
         }
-
-        const html = tracks.map(track => `
+        list.innerHTML = tracks.map(([key, t]) => `
             <div class="track-item">
-                <div class="track-callsign">${track.track_id}</div>
+                <div class="track-callsign">${key}</div>
                 <div class="track-info">
-                    <span>${track.ground_speed ? track.ground_speed.toFixed(0) : '--'} kt</span>
-                    <span>${track.heading ? track.heading.toFixed(0) : '--'}°</span>
+                    <span>${typeof t.gs === 'number' ? t.gs.toFixed(0) : '--'} kt</span>
+                    <span>${typeof t.hdg === 'number' ? t.hdg.toFixed(0) : '--'}°</span>
                 </div>
             </div>
         `).join('');
-
-        list.innerHTML = html;
     }
 
-    updateStats(statsData) {
-        if (statsData.messages_received) {
-            document.getElementById('message-count').textContent = statsData.messages_received;
+    updateStats(s) {
+        if (typeof s.messages_received === 'number') {
+            document.getElementById('message-count').textContent = s.messages_received;
         }
-
-        // Calculate average and max speed
-        if (statsData.speeds && statsData.speeds.length > 0) {
-            const avgSpeed = (statsData.speeds.reduce((a, b) => a + b, 0) / statsData.speeds.length).toFixed(0);
-            const maxSpeed = Math.max(...statsData.speeds).toFixed(0);
-            document.getElementById('avg-speed').textContent = `${avgSpeed} kt`;
-            document.getElementById('max-speed').textContent = `${maxSpeed} kt`;
+        if (typeof s.avg_speed === 'number') {
+            document.getElementById('avg-speed').textContent = `${s.avg_speed.toFixed(0)} kt`;
         }
-
-        // Calculate success rate
-        if (statsData.messages_received > 0) {
-            const successRate = ((statsData.messages_parsed / statsData.messages_received) * 100).toFixed(1);
-            document.getElementById('success-rate').textContent = `${successRate}%`;
+        if (typeof s.max_speed === 'number') {
+            document.getElementById('max-speed').textContent = `${s.max_speed.toFixed(0)} kt`;
+        }
+        if (typeof s.messages_received === 'number' && s.messages_received > 0) {
+            const rate = ((s.messages_parsed / s.messages_received) * 100).toFixed(1);
+            document.getElementById('success-rate').textContent = `${rate}%`;
         }
     }
 
     setConnectionStatus(connected) {
-        const statusDot = document.getElementById('connection-status');
-        const statusText = document.getElementById('connection-text');
-        const statusValue = document.getElementById('status-value');
-
-        if (connected) {
-            statusDot.className = 'status-dot connected';
-            statusText.textContent = 'Connected';
-            statusValue.textContent = 'Connected';
-        } else {
-            statusDot.className = 'status-dot disconnected';
-            statusText.textContent = 'Disconnected';
-            statusValue.textContent = 'Disconnected';
-        }
+        const dot = document.getElementById('connection-status');
+        const text = document.getElementById('connection-text');
+        const value = document.getElementById('status-value');
+        dot.className = connected ? 'status-dot connected' : 'status-dot disconnected';
+        text.textContent = connected ? 'Connected' : 'Disconnected';
+        value.textContent = connected ? 'Connected' : 'Disconnected';
     }
 
     clearTracks() {
@@ -230,12 +272,10 @@ class RadarClient {
         toast.className = `toast toast-${type}`;
         toast.textContent = message;
         container.appendChild(toast);
-
         setTimeout(() => toast.remove(), 3000);
     }
 }
 
-// Initialize the app when the page loads
 document.addEventListener('DOMContentLoaded', () => {
-    new RadarClient();
+    window.radarClient = new RadarClient();
 });

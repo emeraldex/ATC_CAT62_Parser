@@ -1,284 +1,121 @@
-# ATC CAT62 Parser
-**Professional-Grade Radar ASTERIX CAT62 Data Visualization & Analysis Platform**
+# CAT62 Parser
 
-## 🎯 Overview
+A Python tool that decodes ASTERIX **CAT62**-style radar track messages and
+visualizes them live on a web map. It ingests either a UDP feed or a PCAP
+replay, decodes tracks, and streams them to a browser client over WebSocket.
 
-A high-performance, production-ready Python application for real-time visualization and analysis of radar ASTERIX CAT62 data. Designed for air traffic control, aviation, and radar system monitoring environments.
+> ## ⚠️ SCOPE & LIMITATIONS — read first
+>
+> **This is a demonstration / training / development tool. It is NOT certified
+> or suitable for operational air traffic control.** Operational ATC
+> surveillance software requires formal safety assurance (e.g. EUROCONTROL /
+> DO‑278A / ED‑109A), independent verification & validation, redundancy, and
+> validation against real radar — none of which this project provides.
+>
+> Specific technical limitations you must understand:
+>
+> - **The decoder is matched to this repo's own sample generator
+>   (`generate_sample_data.py`), not to the real EUROCONTROL CAT62 UAP.** The
+>   FSPEC/field ordering and LSB scaling are internally self-consistent for
+>   synthetic data. **On a real radar feed it will mis-decode / desync.** Do not
+>   point it at live operational data and trust the output.
+> - **Only a few fields carry data:** I062/010 (SAC/SIC), I062/040 (track
+>   number), I062/105 (WGS‑84 position), I062/185 (velocity → ground speed /
+>   heading). Altitude, Mode 3/A, and callsign are **not** meaningfully decoded.
+> - No authentication, authorization, or TLS. Bind to a trusted network only.
+>
+> This pass hardened robustness (crash-safety, concurrency, lifecycle, offline
+> UI, tests) — see [HARDENING.md](HARDENING.md). It did **not** make the decoder
+> spec-compliant.
 
-**Key Capabilities:**
-- Real-time UDP/multicast reception of radar data
-- PCAP file playback with variable speed
-- WebSocket-based live web visualization
-- REST API for track queries and statistics
-- Support for 20+ CAT62 data fields
-- Automatic track management and history
-- Professional-grade logging and monitoring
+## Requirements
 
-## ✨ Features at a Glance
+- Python 3.10+
+- `websockets` (see `requirements.txt`)
 
-### Backend
-- ✅ **Full CAT62 Parsing** - FSPEC handling, 20+ field support, error resilience
-- ✅ **Multi-Source Support** - UDP unicast/multicast, PCAP playback
-- ✅ **Track Management** - Real-time database, history, auto-cleanup
-- ✅ **WebSocket Broadcasting** - Async streaming to multiple clients
-- ✅ **REST API** - Track query, statistics, health endpoints
-- ✅ **Performance Stats** - Message counters, speed/heading analytics
-- ✅ **Production Logging** - Structured logging with debug mode
-- ✅ **Async/Await** - Non-blocking I/O with proper concurrency
-
-### Frontend
-- ✅ **Live Map Visualization** - OpenStreetMap with Leaflet
-- ✅ **Real-Time Tracks** - Live markers, trails, heading vectors
-- ✅ **Track Information** - Callsign, ICAO address, Mode 3/A, altitude
-- ✅ **Status Monitoring** - Connection indicator, track counter
-- ✅ **Responsive Design** - Mobile-friendly interface
-- ✅ **Zero Dependencies** - Vanilla JavaScript + Leaflet only
-
-## 📋 System Requirements
-
-- **Python**: 3.8 or higher
-- **OS**: Linux, macOS, or Windows
-- **Network**: UDP socket access (optional: multicast)
-- **Browser**: Modern browser with WebSocket support
-
-## 🚀 Quick Start
-
-### 1. Installation
+## Install
 
 ```bash
-# Clone repository
-git clone <repo-url>
-cd ATC_CAT62_Parser
-
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate  # Linux/Mac
-# or: venv\Scripts\activate  (Windows)
-
-# Install dependencies
-pip install websockets
+python -m venv .venv
+. .venv/Scripts/activate        # Windows;  use  source .venv/bin/activate  on Linux/macOS
+pip install -r requirements.txt
 ```
 
-### 2. Run with Live UDP Data
+## Run
+
+Generate a sample capture, then replay it:
 
 ```bash
-# Unicast UDP
+python generate_sample_data.py            # writes sample_radar.pcap
+python parser_server.py --pcap sample_radar.pcap --loop
+```
+
+Or listen on a UDP feed (synthetic sender that matches the generator):
+
+```bash
 python parser_server.py --udp 0.0.0.0:31002
-
-# Multicast UDP
-python parser_server.py --udp 224.0.0.1:31002 --mcast 224.0.0.1
 ```
 
-### 3. Run with PCAP Playback
+Then open **http://localhost:7878** in a browser.
+
+### Options
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--pcap FILE` | — | Replay a PCAP capture |
+| `--udp HOST:PORT` | — | Bind a UDP ingest socket |
+| `--mcast GROUP` | — | Join a multicast group (with `--udp`) |
+| `--speed N` | `1.0` | PCAP playback speed multiplier |
+| `--loop` | off | Replay the PCAP repeatedly |
+| `--http-port N` | `7878` | HTTP/API + web UI port |
+| `--ws-port N` | `8765` | WebSocket port |
+| `--bind ADDR` | `0.0.0.0` | Bind address for HTTP + WS |
+| `--tile-url URL` | OSM | Map tile template served to the client |
+| `--verbose` | off | Debug logging (also `LOG_LEVEL=DEBUG`) |
+
+The server keeps serving after a finite PCAP finishes (tracks age out); press
+Ctrl‑C (or send SIGTERM) for a clean shutdown.
+
+## HTTP API
+
+| Endpoint | Returns |
+|----------|---------|
+| `GET /api/tracks` | Current tracks (array) |
+| `GET /api/stats` | Message/speed/heading statistics |
+| `GET /api/config` | `{ws_port, http_port, tile_url}` (the client reads this to find the WS port) |
+| `GET /api/health` | Liveness: `200` when the WS is up and frames are recent, `503` when degraded |
+
+## Offline / air-gapped use
+
+Leaflet is **vendored** under `client/vendor/leaflet/`, so the UI loads with no
+internet. Map **tiles** still come from the `--tile-url` (OpenStreetMap by
+default); when tiles are unreachable the map falls back to a coordinate
+graticule so track markers stay usable. To use a local basemap, point
+`--tile-url` at a reachable local tile server / path.
+
+## Tests
 
 ```bash
-# Normal speed
-python parser_server.py --pcap data.pcap
-
-# 2x speed
-python parser_server.py --pcap data.pcap --speed 2.0
+pip install -r requirements-dev.txt
+python -m pytest
 ```
 
-### 4. Access Web UI
+The suite covers the decode round-trip (generator ↔ decoder), frame processing
+(including malformed and position-only records), the HTTP API, and the
+WSHub concurrency locking. See [TESTING_GUIDE.md](TESTING_GUIDE.md).
 
-Open browser: `http://localhost:7878`
+## Deployment
 
-## 📊 Architecture
+`Dockerfile` + `docker-compose.yml` (Compose v2) build a non-root container with
+a real healthcheck; `cat62-parser.service` is a hardened systemd unit. Pin the
+runtime via `requirements.txt`. Again: **trusted networks only, non-operational
+use.**
+
+## Layout
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Radar Data Source                        │
-│              (UDP, Multicast, or PCAP File)                │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  Parser Backend (Python)                     │
-├─────────────────────────────────────────────────────────────┤
-│  • UDP Receiver / PCAP Playback                             │
-│  • CAT62 Binary Parser (FSPEC-based)                        │
-│  • Track Database & History                                 │
-│  • WebSocket Hub (Broadcasting)                             │
-│  • REST API Server (HTTP)                                   │
-│  • Statistics & Monitoring                                  │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-        ┌────────────┼────────────┐
-        │            │            │
-        ▼            ▼            ▼
-    WebSocket     REST API     Static Files
-    (ws://8765)   (http/7878)   (index.html)
-        │            │            │
-        └────────────┼────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Web Browser (Frontend)                          │
-├─────────────────────────────────────────────────────────────┤
-│  • Leaflet Map (OpenStreetMap)                              │
-│  • Real-Time Track Visualization                            │
-│  • Status Indicators                                        │
-│  • Responsive UI                                            │
-└─────────────────────────────────────────────────────────────┘
+parser_server.py        # server: decoder, UDP/PCAP ingest, WS hub, HTTP API
+generate_sample_data.py # synthetic CAT62 PCAP generator (defines the decoder contract)
+client/                 # web UI (index.html, app.js, style.css, vendor/leaflet)
+tests/                  # pytest suite
 ```
-
-## 📡 Data Flow
-
-1. **Radar Data** arrives via UDP or PCAP
-2. **Parser** extracts CAT62 records using FSPEC decoding
-3. **Track Manager** updates track database with latest position/velocity
-4. **WebSocket Hub** broadcasts updates to all connected clients
-5. **Frontend** renders real-time map visualization
-
-## 🔌 API Endpoints
-
-### Track List
-```bash
-curl http://localhost:7878/api/tracks
-```
-
-### Statistics
-```bash
-curl http://localhost:7878/api/stats
-```
-
-### Health Check
-```bash
-curl http://localhost:7878/api/health
-```
-
-## 📝 Configuration
-
-Edit `parser_server.py` constants:
-
-```python
-WS_PORT = 8765              # WebSocket server port
-HTTP_PORT = 7878            # HTTP/REST server port
-MAX_TRACK_HISTORY = 300     # Historical points per track
-TRACK_TIMEOUT = 30          # Track stale timeout (seconds)
-STATS_INTERVAL = 5          # Statistics reporting interval
-```
-
-## 🔍 Supported CAT62 Fields
-
-| Field | Description | Type |
-|-------|-------------|------|
-| I062/010 | Data Source Identifier (SAC/SIC) | Source |
-| I062/015 | Service Identification | Service |
-| I062/040 | Track Number | Identity |
-| I062/060 | Track Status | Status |
-| I062/080 | Mode 3/A Code | Identity |
-| I062/100 | Position (Cartesian) | Position |
-| I062/105 | Position (WGS-84) | Position |
-| I062/185 | Velocity (Cartesian→Speed/Heading) | Kinematics |
-| I062/200 | Target Address (ICAO 24-bit) | Identity |
-| I062/245 | Target Identification (Callsign) | Identity |
-
-## 📊 Performance
-
-| Metric | Value |
-|--------|-------|
-| Message Processing | <1ms per message |
-| WebSocket Latency | <5ms broadcast |
-| Memory Usage | ~10KB per track |
-| CPU Usage | <5% @ 1000 msgs/sec |
-| Supported Clients | 100+ concurrent |
-| Max Tracks | 1000+ simultaneous |
-
-## 🛠️ Advanced Usage
-
-### Debug Mode
-```bash
-python parser_server.py --udp 0.0.0.0:31002 --verbose
-```
-
-### PCAP Conversion
-```bash
-# PCAP-NG to PCAP (using editcap from Wireshark)
-editcap -F pcap input.pcapng output.pcap
-```
-
-### Systemd Service (Linux)
-```bash
-# See DEPLOYMENT.md for service configuration
-sudo systemctl start cat62-parser
-sudo systemctl status cat62-parser
-```
-
-### Docker Deployment
-```bash
-docker build -t cat62-parser .
-docker run -p 7878:7878 -p 8765:8765 -p 31002:31002/udp cat62-parser
-```
-
-## 📚 Documentation
-
-- **[FEATURES.md](FEATURES.md)** - Detailed feature list
-- **[DEPLOYMENT.md](DEPLOYMENT.md)** - Installation, deployment, troubleshooting
-- **[ASTERIX_REFERENCE.md](ASTERIX_REFERENCE.md)** - CAT62 field reference
-
-## 🔧 Development
-
-### Project Structure
-```
-ATC_CAT62_Parser/
-├── parser_server.py       # Main application
-├── client/               # Web frontend
-│   ├── index.html       # Main page
-│   ├── app.js           # Track visualization logic
-│   └── style.css        # Styling
-├── README.md            # This file
-├── FEATURES.md          # Feature documentation
-├── DEPLOYMENT.md        # Deployment guide
-└── tests/               # Unit tests (optional)
-```
-
-### Code Quality
-- **Type Hints**: Full Python type annotations
-- **Error Handling**: Comprehensive exception handling
-- **Logging**: Production-grade structured logging
-- **Async**: Modern async/await patterns
-
-## 🐛 Troubleshooting
-
-**No tracks appearing?**
-- Verify UDP data: `tcpdump -i eth0 udp port 31002`
-- Check parser logs: Add `--verbose` flag
-- Validate PCAP file: `tcpdump -r data.pcap | head`
-
-**WebSocket connection fails?**
-- Check firewall allows port 8765
-- Verify parser running: `lsof -i :8765`
-- Browser console for errors (F12)
-
-**High CPU/Memory usage?**
-- Reduce `MAX_TRACK_HISTORY`
-- Increase `TRACK_TIMEOUT`
-- Monitor with: `top`, `ps aux`
-
-See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed troubleshooting.
-
-## 📄 License
-
-[Specify your license here]
-
-## 🤝 Contributing
-
-Contributions welcome! Please ensure:
-- Code follows existing style
-- Changes include tests
-- Documentation is updated
-
-## 📞 Support
-
-For issues and questions:
-- Check [DEPLOYMENT.md](DEPLOYMENT.md)
-- Review logs with `--verbose` flag
-- Verify system requirements
-- Check firewall/network settings
-
----
-
-**Version**: 2.0.0  
-**Last Updated**: 2026-07-04  
-**Status**: Production Ready ✅

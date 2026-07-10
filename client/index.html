@@ -4,9 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Radar CAT62 Parser - Live Tracking</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    <!-- Leaflet is vendored locally so the UI works in an air-gapped network -->
+    <link rel="stylesheet" href="vendor/leaflet/leaflet.min.css" />
     <link rel="stylesheet" href="style.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    <script src="vendor/leaflet/leaflet.min.js"></script>
 </head>
 <body>
     <div class="container">

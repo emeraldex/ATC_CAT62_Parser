@@ -1,8 +1,16 @@
 # ASTERIX CAT62 Reference Guide
 
+> ⚠️ **Accuracy note:** This document describes the *general* ASTERIX CAT62
+> concept, but this project's decoder is matched to the repo's synthetic
+> generator, **not** to the authoritative EUROCONTROL CAT62 UAP. Field ordering,
+> some item lengths, and LSB scaling here do **not** all match the real spec, and
+> only I062/010, I062/040, I062/105, and I062/185 actually carry decoded data.
+> See **SCOPE & LIMITATIONS** in the [README](README.md) before relying on this
+> for a real feed.
+
 ## Overview
 
-ASTERIX CAT62 (Category 62) is used for Radar Track and Flight Plan messages in Air Traffic Control systems. This reference documents the fields supported by this parser.
+ASTERIX CAT62 (Category 62) is used for Radar Track and Flight Plan messages in Air Traffic Control systems. This reference documents the fields this parser handles (for synthetic data).
 
 ## Message Structure
 

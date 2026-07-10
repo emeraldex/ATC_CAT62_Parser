@@ -15,7 +15,10 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from parser_server import main, Asterix62, TrackData, Statistics
+import asyncio as _asyncio
+
+from parser_server import Asterix62, TrackData, Statistics, WSHub, handle_frame
+from generate_sample_data import create_cat62_record
 
 
 class TestIntegration:
@@ -48,12 +51,18 @@ class TestIntegration:
         parser = Asterix62(frame)
         assert parser.ok is True
     
-    def test_udp_frame_structure(self):
-        """Test UDP frame wrapping"""
-        record = self.create_test_cat62_frame()
-        # Simulate UDP frame with length header
-        frame = struct.pack('>H', len(record)) + record
-        assert len(frame) >= len(record) + 2
+    def test_frame_ingests_into_hub(self):
+        """Real pipeline: a raw CAT62 datagram -> handle_frame -> a live track.
+
+        This exercises the actual ingest path (the UDP/pcap loops both call
+        handle_frame with the raw ASTERIX payload -- there is no extra length
+        prefix)."""
+        hub = WSHub()
+        payload = bytes(create_cat62_record(9, 51.5, -0.1, 400.0, 90.0))
+        _asyncio.new_event_loop().run_until_complete(handle_frame(hub, payload))
+        tracks = hub.snapshot_tracks()
+        assert len(tracks) == 1
+        assert abs(tracks[0]['ground_speed'] - 400.0) < 1.0
 
 
 class TestDataPipeline:

@@ -3,25 +3,27 @@
 Professional Radar CAT62 ASTERIX Parser
 Industry-grade radar data visualization and analysis platform
 """
-import argparse, asyncio, socket, struct, time, threading, json, logging, statistics
+import argparse, asyncio, socket, struct, time, threading, json, logging, statistics, signal, os
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from dataclasses import dataclass, asdict
-from collections import defaultdict, deque
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from collections import deque
+from typing import Dict, Optional
 import math
 
-# Configuration
-WS_PORT = 8765
-HTTP_PORT = 7878
+# Configuration (defaults; overridable via CLI flags / env)
+DEFAULT_WS_PORT = 8765
+DEFAULT_HTTP_PORT = 7878
+DEFAULT_BIND = '0.0.0.0'
+DEFAULT_TILE_URL = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
 MAX_TRACK_HISTORY = 300  # Points per track
 TRACK_TIMEOUT = 30  # seconds
 STATS_INTERVAL = 5  # seconds
 
-# Logging setup
+# Logging setup (honors LOG_LEVEL env var; --verbose overrides to DEBUG)
+_env_level = os.environ.get('LOG_LEVEL', 'INFO').upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, _env_level, logging.INFO),
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -147,25 +149,29 @@ class Asterix62:
             logger.debug(f"CAT62 Parse error: {e}")
 
     def _parse(self) -> bool:
-        """Parse CAT62 ASTERIX record"""
+        """Parse CAT62 ASTERIX record. Sets self.error_msg on any rejection."""
         b = self.b
         if len(b) < 3:
+            self.error_msg = f'Too short: {len(b)} bytes (need >= 3)'
             return False
-        
+
         cat = b[0]
         if cat != 62:
+            self.error_msg = f'Wrong category: {cat} (expected 62)'
             return False
-        
+
         length = _u16(b, 1)
         if length > len(b) or length < 3:
+            self.error_msg = f'Bad length field: {length} (payload {len(b)} bytes)'
             return False
-        
+
         fspec_start = 3
         fspec_end = fspec_start
-        
+
         # Read FSPEC (variable length, bit7 indicates extension)
         while True:
             if fspec_end >= length:
+                self.error_msg = 'Truncated FSPEC'
                 return False
             octet = b[fspec_end]
             fspec_end += 1
@@ -224,7 +230,8 @@ class Asterix62:
                         try:
                             self.items[name] = fn(take)
                         except Exception as e:
-                            logger.debug(f"Error decoding {name}: {e}")
+                            self.error_msg = f'Error decoding {name}: {e}'
+                            logger.debug(self.error_msg)
                             return False
                 bit_index += 1
         return True
@@ -355,80 +362,123 @@ def _ia5(v):
 
 # -------------------------- WebSocket Broadcaster ---------------------------
 class WSHub:
-    """WebSocket hub with track management and broadcasting"""
+    """WebSocket hub with track management and broadcasting.
+
+    Shared state (tracks/stats/clients) is touched by both the asyncio event
+    loop and the HTTP server's daemon thread, so every access goes through
+    ``self._lock``. Rule: never hold the lock across an ``await`` or across a
+    blocking socket write -- snapshot under the lock, then act outside it.
+    """
     def __init__(self):
         self.clients = set()
         self.tracks: Dict[str, TrackData] = {}
         self.stats = Statistics()
+        self._lock = threading.Lock()
+        # Lifecycle handles, set once the servers are up (used for shutdown).
+        self.httpd = None
+        self.ws_server_obj = None
+        self.last_frame_ts = 0.0  # wall-clock time of the last ingested frame
 
     async def register(self, ws):
-        self.clients.add(ws)
-        logger.debug(f"WebSocket client connected. Total: {len(self.clients)}")
+        with self._lock:
+            self.clients.add(ws)
+            n = len(self.clients)
+        logger.debug(f"WebSocket client connected. Total: {n}")
 
     async def unregister(self, ws):
-        self.clients.discard(ws)
-        logger.debug(f"WebSocket client disconnected. Total: {len(self.clients)}")
+        with self._lock:
+            self.clients.discard(ws)
+            n = len(self.clients)
+        logger.debug(f"WebSocket client disconnected. Total: {n}")
 
     async def broadcast(self, msg_bytes):
-        """Broadcast message to all connected clients"""
+        """Broadcast message to all connected clients."""
+        with self._lock:
+            targets = list(self.clients)
         dead = []
-        for ws in list(self.clients):
+        for ws in targets:
             try:
                 await ws.send(msg_bytes)
             except Exception as e:
                 logger.debug(f"Broadcast error: {e}")
                 dead.append(ws)
-        for ws in dead:
-            await self.unregister(ws)
+        if dead:
+            with self._lock:
+                for ws in dead:
+                    self.clients.discard(ws)
 
     async def broadcast_json(self, msg_dict):
         """Broadcast JSON message"""
         await self.broadcast(json.dumps(msg_dict).encode('utf-8'))
 
     def update_track(self, track_id: str, data: Dict):
-        """Update or create track"""
-        track = self.tracks.get(track_id)
-        if not track:
-            track = TrackData(track_id=track_id)
-            self.tracks[track_id] = track
-        
-        # Update fields
-        if 'pos' in data:
-            track.pos_lat = data['pos'].get('lat')
-            track.pos_lon = data['pos'].get('lon')
-        if 'xy' in data:
-            track.pos_x = data['xy'].get('x')
-            track.pos_y = data['xy'].get('y')
-        if 'gs' in data:
-            track.ground_speed = data['gs']
-            self.stats.record_speed(data['gs'])
-        if 'hdg' in data:
-            track.heading = data['hdg']
-            self.stats.record_heading(data['hdg'])
-        if 'id' in data:
-            track.callsign = data['id']
-        if 'addr' in data:
-            track.icao_address = data['addr']
-        if 'm3a' in data:
-            track.mode3a = data['m3a']
-        if 'src' in data:
-            src = data['src']
-            if 'sac' in src:
-                track.sac = src['sac']
-            if 'sic' in src:
-                track.sic = src['sic']
-        if 'tn' in data:
-            track.track_num = data['tn']
-        
-        track.timestamp = data.get('ts', time.time())
-    
+        """Update or create track (event-loop side; holds the lock briefly)."""
+        with self._lock:
+            track = self.tracks.get(track_id)
+            if not track:
+                track = TrackData(track_id=track_id)
+                self.tracks[track_id] = track
+
+            # Update fields
+            if 'pos' in data:
+                track.pos_lat = data['pos'].get('lat')
+                track.pos_lon = data['pos'].get('lon')
+            if 'xy' in data:
+                track.pos_x = data['xy'].get('x')
+                track.pos_y = data['xy'].get('y')
+            if 'gs' in data:
+                track.ground_speed = data['gs']
+                self.stats.record_speed(data['gs'])
+            if 'hdg' in data:
+                track.heading = data['hdg']
+                self.stats.record_heading(data['hdg'])
+            if 'id' in data:
+                track.callsign = data['id']
+            if 'addr' in data:
+                track.icao_address = data['addr']
+            if 'm3a' in data:
+                track.mode3a = data['m3a']
+            if 'src' in data:
+                src = data['src']
+                if 'sac' in src:
+                    track.sac = src['sac']
+                if 'sic' in src:
+                    track.sic = src['sic']
+            if 'tn' in data:
+                track.track_num = data['tn']
+
+            track.timestamp = data.get('ts', time.time())
+            self.last_frame_ts = time.time()
+
+    def record_message(self, success: bool):
+        """Record a decode outcome in stats (thread-safe)."""
+        with self._lock:
+            self.stats.record_message(success)
+
     def cull_stale_tracks(self, timeout: float = TRACK_TIMEOUT) -> int:
-        """Remove stale tracks, return count removed"""
+        """Remove stale tracks, return count removed."""
         now = time.time()
-        stale = [tid for tid, t in self.tracks.items() if t.is_stale(now, timeout)]
-        for tid in stale:
-            del self.tracks[tid]
-        return len(stale)
+        with self._lock:
+            stale = [tid for tid, t in self.tracks.items() if t.is_stale(now, timeout)]
+            for tid in stale:
+                del self.tracks[tid]
+            return len(stale)
+
+    # -- Snapshot helpers for the HTTP thread (copy under lock, serialize after) --
+    def snapshot_tracks(self) -> list:
+        with self._lock:
+            return [t.to_dict() for t in self.tracks.values()]
+
+    def stats_snapshot(self) -> Dict:
+        with self._lock:
+            report = self.stats.get_report()
+            report['tracks_active'] = len(self.tracks)
+            return report
+
+    def counts(self):
+        """Return (active_tracks, connected_clients, last_frame_ts)."""
+        with self._lock:
+            return len(self.tracks), len(self.clients), self.last_frame_ts
 
 # ------------------------------ HTTP server --------------------------------
 class SPAHandler(SimpleHTTPRequestHandler):
@@ -443,93 +493,80 @@ class SPAHandler(SimpleHTTPRequestHandler):
         """Suppress default logging"""
         logger.debug(f"HTTP: {format % args}")
     
-# ------------------------------ PCAP Reader --------------------------------
-# Minimal PCAP parser for LINKTYPE_ETHERNET and LINKTYPE_RAW (UDP only)
-PCAP_HDR = struct.Struct('>IHHiiii')
-PKT_HDR = struct.Struct('>IIII')
-
-class PcapSource:
-    def __init__(self, fname):
-        self.f = open(fname, 'rb')
-        self._init()
-
-    def _init(self):
-        gh = self.f.read(24)
-        if len(gh) != 24:
-            raise RuntimeError('Not a PCAP file')
-        # Endianness sniff
-        magic = struct.unpack_from('I', gh, 0)[0]
-        self.le = (magic == 0xA1B2C3D4)
-        self.linktype = struct.unpack('<I' if self.le else '>I', gh[20:24])[0]
-
-    def packets(self):
-        rd = self.f.read
-        while True:
-            hdr = rd(16)
-            if len(hdr) != 16: break
-            if self.le:
-                ts_sec, ts_usec, incl, orig = struct.unpack('<IIII', hdr)
-            else:
-                ts_sec, ts_usec, incl, orig = struct.unpack('>IIII', hdr)
-            data = rd(incl)
-            yield ts_sec + ts_usec/1e6, data
-
 # ------------------------------ Main runner --------------------------------
-# ------------------------------ Main runner --------------------------------
-def run_http(hub: WSHub):
-    Path('client').mkdir(exist_ok=True)
-    
-    # Write client files if missing
-    idx = Path('client/index.html')
-    if not idx.exists(): 
-        idx.write_text(INDEX_HTML)
-    
-    js = Path('client/app.js')
-    if not js.exists(): 
-        js.write_text(APP_JS)
-    
-    css = Path('client/style.css')
-    if not css.exists():
-        css.write_text(STYLE_CSS)
-    
+# (The PCAP reader / _udp_payload live further down, just above main().)
+def run_http(hub: WSHub, http_port: int, bind: str, ws_port: int, tile_url: str):
+    """Serve the static client + JSON API. Runs in a daemon thread.
+
+    On a bind failure this logs and returns instead of dying silently: the
+    rest of the process (WS + ingest) keeps running.
+    """
+
+    def _write_json(handler, obj, status=200):
+        """Serialize outside any lock, then write; tolerate client disconnects."""
+        body = json.dumps(obj).encode()
+        try:
+            handler.send_response(status)
+            handler.send_header('Content-type', 'application/json')
+            handler.send_header('Content-Length', str(len(body)))
+            handler.end_headers()
+            handler.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass  # client went away mid-response; nothing to do
+
     # Enhanced HTTP server with API endpoints
     class APIHandler(SPAHandler):
         def do_GET(self):
-            # API endpoints
-            if self.path == '/api/tracks':
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                tracks = [t.to_dict() for t in hub.tracks.values()]
-                self.wfile.write(json.dumps(tracks).encode())
-            elif self.path == '/api/stats':
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                stats = hub.stats.get_report()
-                stats['tracks_active'] = len(hub.tracks)
-                self.wfile.write(json.dumps(stats).encode())
-            elif self.path == '/api/health':
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                health = {
-                    'status': 'healthy',
-                    'connected_clients': len(hub.clients),
-                    'active_tracks': len(hub.tracks),
-                    'timestamp': time.time()
-                }
-                self.wfile.write(json.dumps(health).encode())
-            else:
-                super().do_GET()
-    
-    httpd = HTTPServer(('0.0.0.0', HTTP_PORT), APIHandler)
-    logger.info(f"HTTP server on http://0.0.0.0:{HTTP_PORT}")
-    httpd.serve_forever()
+            try:
+                if self.path == '/api/tracks':
+                    _write_json(self, hub.snapshot_tracks())
+                elif self.path == '/api/stats':
+                    _write_json(self, hub.stats_snapshot())
+                elif self.path == '/api/config':
+                    _write_json(self, {'ws_port': ws_port, 'http_port': http_port,
+                                       'bind': bind, 'tile_url': tile_url})
+                elif self.path == '/api/health':
+                    active, clients, last_ts = hub.counts()
+                    ws_up = hub.ws_server_obj is not None
+                    age = (time.time() - last_ts) if last_ts else None
+                    # "healthy" only if the WS is up and we've seen a frame recently
+                    ok = ws_up and (age is None or age < TRACK_TIMEOUT * 2)
+                    _write_json(self, {
+                        'status': 'healthy' if ok else 'degraded',
+                        'websocket_up': ws_up,
+                        'connected_clients': clients,
+                        'active_tracks': active,
+                        'seconds_since_last_frame': round(age, 1) if age is not None else None,
+                        'timestamp': time.time(),
+                    }, status=200 if ok else 503)
+                else:
+                    super().do_GET()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+            except Exception as e:
+                logger.error(f"HTTP handler error for {self.path}: {e}")
 
-async def ws_server(hub: WSHub):
+    class _Server(HTTPServer):
+        allow_reuse_address = True
+
+    try:
+        httpd = _Server((bind, http_port), APIHandler)
+    except OSError as e:
+        logger.error(f"HTTP server could not bind {bind}:{http_port} ({e}); "
+                     f"web UI/API unavailable")
+        return
+    hub.httpd = httpd
+    logger.info(f"HTTP server on http://{bind}:{http_port}")
+    try:
+        httpd.serve_forever()
+    except Exception as e:
+        logger.error(f"HTTP server stopped: {e}")
+    finally:
+        httpd.server_close()
+
+async def ws_server(hub: WSHub, ws_port: int, bind: str):
     import websockets
-    
+
     async def handler(websocket):
         await hub.register(websocket)
         try:
@@ -537,117 +574,157 @@ async def ws_server(hub: WSHub):
                 pass
         finally:
             await hub.unregister(websocket)
-    
-    logger.info(f"WebSocket server on ws://0.0.0.0:{WS_PORT}")
-    return await websockets.serve(handler, '0.0.0.0', WS_PORT)
 
-async def udp_loop(hub: WSHub, bind, mcast=None):
-    """UDP receive loop"""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(bind)
-    if mcast:
-        mreq = socket.inet_aton(mcast) + socket.inet_aton(bind[0])
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-        logger.info(f"Joined multicast group {mcast}")
-    sock.setblocking(False)
+    server = await websockets.serve(handler, bind, ws_port)
+    logger.info(f"WebSocket server on ws://{bind}:{ws_port}")
+    return server
+
+async def _maybe_maintain(hub: WSHub, last_cull: float) -> float:
+    """Periodic cull + stats broadcast; returns updated last_cull timestamp."""
+    now = time.time()
+    if now - last_cull > 2:
+        culled = hub.cull_stale_tracks()
+        if culled > 0:
+            logger.debug(f"Culled {culled} stale tracks")
+        last_cull = now
+        if hub.stats.should_report():
+            await hub.broadcast_json({'type': 'stats', 'data': hub.stats_snapshot()})
+    return last_cull
+
+
+async def udp_loop(hub: WSHub, bind, mcast=None, stop_event: 'asyncio.Event' = None):
+    """UDP receive loop."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(bind)
+        if mcast:
+            mreq = socket.inet_aton(mcast) + socket.inet_aton(bind[0])
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+            logger.info(f"Joined multicast group {mcast}")
+        sock.setblocking(False)
+    except OSError as e:
+        logger.error(f"UDP setup failed on {bind[0]}:{bind[1]} ({e}); ingest disabled")
+        return
+
     loop = asyncio.get_running_loop()
     logger.info(f"UDP listening on {bind[0]}:{bind[1]}")
-    
     last_cull = time.time()
-    while True:
-        try:
-            data, _ = await loop.run_in_executor(None, sock.recvfrom, 65536)
-            await handle_frame(hub, data)
-        except BlockingIOError:
-            pass
-        except Exception as e:
-            logger.error(f"UDP error: {e}")
-        
-        # Periodically cull stale tracks
-        now = time.time()
-        if now - last_cull > 2:
-            culled = hub.cull_stale_tracks()
-            if culled > 0:
-                logger.debug(f"Culled {culled} stale tracks")
-            last_cull = now
-            
-            # Send stats if needed
-            if hub.stats.should_report():
-                await hub.broadcast_json({'type': 'stats', 'data': hub.stats.get_report()})
-        
-        await asyncio.sleep(0.01)
-
-async def pcap_loop(hub: WSHub, fname, speed=1.0):
-    """PCAP replay loop"""
     try:
-        src = PcapSource(fname)
-    except Exception as e:
-        logger.error(f"Failed to open PCAP: {e}")
-        return
-    
-    t0 = None
-    m0 = None
+        while stop_event is None or not stop_event.is_set():
+            try:
+                data, _ = await loop.run_in_executor(None, sock.recvfrom, 65536)
+                await handle_frame(hub, data)
+            except BlockingIOError:
+                pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"UDP error: {e}")
+                await asyncio.sleep(0.1)  # backoff so a persistent error can't spin
+            last_cull = await _maybe_maintain(hub, last_cull)
+            await asyncio.sleep(0.01)
+    finally:
+        sock.close()
+        logger.info("UDP loop stopped")
+
+async def pcap_loop(hub: WSHub, fname, speed=1.0, loop_forever=False,
+                    stop_event: 'asyncio.Event' = None):
+    """PCAP replay loop. Replays once, or repeatedly when loop_forever is set."""
+    while stop_event is None or not stop_event.is_set():
+        try:
+            src = PcapSource(fname)
+        except Exception as e:
+            logger.error(f"Failed to open PCAP {fname}: {e}")
+            return
+
+        t0 = None
+        m0 = None
+        last_cull = time.time()
+        try:
+            for ts, frame in src.packets():
+                if stop_event is not None and stop_event.is_set():
+                    break
+                payload = _udp_payload(frame)
+                if not payload:
+                    continue
+                if t0 is None:
+                    t0 = ts
+                    m0 = time.time()
+                    logger.info(f"Starting PCAP playback from {fname}")
+                # Timing (pace playback to the capture timestamps)
+                target = m0 + (ts - t0) / max(speed, 0.001)
+                while time.time() < target:
+                    if stop_event is not None and stop_event.is_set():
+                        break
+                    await asyncio.sleep(0.001)
+                await handle_frame(hub, payload)
+                last_cull = await _maybe_maintain(hub, last_cull)
+        finally:
+            src.close()
+
+        if not loop_forever:
+            logger.info("PCAP playback complete")
+            return
+        logger.info("PCAP playback complete; looping")
+
+async def idle_serve(hub: WSHub, stop_event: 'asyncio.Event'):
+    """Keep the process alive after ingest ends: cull + heartbeat stats.
+
+    Without this the server would exit the moment a finite pcap finished,
+    dropping any connected operator client.
+    """
+    logger.info("Ingest ended; server idle (still serving HTTP/WS). Ctrl-C to exit.")
     last_cull = time.time()
-    
-    for ts, frame in src.packets():
-        payload = _udp_payload(frame)
-        if not payload:
-            continue
-        
-        if t0 is None:
-            t0 = ts
-            m0 = time.time()
-            logger.info(f"Starting PCAP playback from {fname}")
-        
-        # Timing
-        target = m0 + (ts - t0) / max(speed, 0.001)
-        while time.time() < target:
-            await asyncio.sleep(0.001)
-        
-        await handle_frame(hub, payload)
-        
-        # Periodic maintenance
-        now = time.time()
-        if now - last_cull > 2:
-            culled = hub.cull_stale_tracks()
-            last_cull = now
-            if hub.stats.should_report():
-                await hub.broadcast_json({'type': 'stats', 'data': hub.stats.get_report()})
+    while not stop_event.is_set():
+        last_cull = await _maybe_maintain(hub, last_cull)
+        await asyncio.sleep(0.2)
+
+def derive_track_id(msg: Dict) -> str:
+    """Stable track key from a decoded message, tolerant of missing fields.
+
+    Falls back through callsign -> ICAO addr -> sac.sic.tn, using placeholders
+    so a position-only record (no I062/010 or I062/040) can never raise.
+    """
+    if msg.get('id'):
+        return str(msg['id'])
+    if msg.get('addr'):
+        return str(msg['addr'])
+    src = msg.get('src') or {}
+    return f"{src.get('sac', '?')}.{src.get('sic', '?')}.{msg.get('tn', '?')}"
 
 async def handle_frame(hub: WSHub, payload: bytes):
-    """Process ASTERIX frame with multiple records"""
+    """Process ASTERIX frame with multiple records."""
     i = 0
     now = time.time()
-    
+
     while i + 3 <= len(payload):
         cat = payload[i]
         if cat != 62:
             break
-        
         if i + 5 > len(payload):
             break
-        
         length = _u16(payload, i+1)
         if length <= 3 or i + length > len(payload):
             break
-        
-        rec = payload[i:i+length]
-        dec = Asterix62(rec)
-        
-        hub.stats.record_message(dec.ok)
-        
-        if dec.ok:
-            msg = build_json(dec.items, now)
-            if msg:
-                # Update track in hub
-                track_id = msg.get('id') or msg.get('addr') or f"{msg['src']['sac']}.{msg['src']['sic']}.{msg['tn']}"
-                hub.update_track(track_id, msg)
-                
-                await hub.broadcast_json(msg)
-        else:
-            logger.debug(f"Failed to parse CAT62 record: {dec.error_msg}")
-        
+
+        try:
+            rec = payload[i:i+length]
+            dec = Asterix62(rec)
+            hub.record_message(dec.ok)
+            if dec.ok:
+                msg = build_json(dec.items, now)
+                if msg:
+                    hub.update_track(derive_track_id(msg), msg)
+                    await hub.broadcast_json(msg)
+            else:
+                logger.debug(f"Failed to parse CAT62 record: {dec.error_msg}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # One malformed record must never abort the rest of the frame.
+            logger.debug(f"Skipping bad CAT62 record at offset {i}: {e}")
+
         i += length
 
 def build_json(items, ts):
@@ -690,186 +767,6 @@ def build_json(items, ts):
     
     return out
 
-# ------------------------------ Static client ------------------------------
-INDEX_HTML = """<!doctype html>
-<html>
-<head>
-  <meta charset='utf-8'/>
-  <meta name='viewport' content='width=device-width, initial-scale=1'/>
-  <title>CAT62 Live Viewer</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-  <style> html,body,#map{height:100%;margin:0} .badge{background:#0008;color:#fff;padding:2px 6px;border-radius:6px;font:12px/16px system-ui;}
-  .panel{position:absolute;top:8px;left:8px;background:#fff;border-radius:12px;box-shadow:0 6px 20px #0002;padding:10px 12px;font:14px system-ui}
-  .panel h1{font-size:16px;margin:0 0 8px}
-  </style>
-</head>
-<body>
-  <div id='map'></div>
-  <div class='panel'>
-    <h1>CAT62 Live Viewer</h1>
-    <div>WS: <span id='wsstat'>connecting…</span></div>
-    <div>Tracks: <span id='trkcount'>0</span></div>
-  </div>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="app.js"></script>
-</body>
-</html>"""
-
-APP_JS = """
-const map = L.map('map').setView([3.1390, 101.6869], 8); // KL area default
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 12 }).addTo(map);
-
-const wsstat = document.getElementById('wsstat');
-const trkcount = document.getElementById('trkcount');
-
-const tracks = new Map();
-
-function makeKey(msg){
-  // Prefer ICAO address, else Track Number, else composite
-  return msg.addr || (msg.src? `${msg.src.sac}.${msg.src.sic}.${msg.tn||'?'}`: `${Date.now()}-${Math.random()}`);
-}
-
-function ensureLayer(t){
-  if(!t.layer){ t.layer = L.layerGroup().addTo(map); }
-  if(!t.marker){ t.marker = L.marker([0,0], {rotationAngle:0}).addTo(t.layer); }
-  if(!t.trail){ t.trail = L.polyline([], {weight:2, opacity:0.6}).addTo(t.layer); }
-}
-
-function headingArrow(hdg){
-  const len = 0.05; // degrees-ish; fine for visualization
-  const rad = (hdg||0) * Math.PI / 180;
-  return [Math.sin(rad)*len, Math.cos(rad)*len];
-}
-
-function updateTrack(msg){
-  const key = makeKey(msg);
-  let t = tracks.get(key);
-  if(!t){ t = { history: [] }; tracks.set(key, t); }
-  ensureLayer(t);
-  const now = Date.now();
-
-  // Position
-  let lat, lon;
-  if(msg.pos){ lat = msg.pos.lat; lon = msg.pos.lon; }
-  else if(msg.xy){ return; } // skip cartesian only for now
-  else { return; }
-
-  // Update history (max 60 points)
-  t.history.push([lat, lon]);
-  if(t.history.length > 60) t.history.shift();
-
-  // Heading vector
-  let hdg = msg.hdg || null;
-  t.marker.setLatLng([lat,lon]);
-  t.trail.setLatLngs(t.history);
-
-  const label = `${msg.id || msg.addr || ''} ${msg.m3a? '('+msg.m3a+')':''} ${msg.gs? Math.round(msg.gs)+'kt':''}`.trim();
-  const div = L.divIcon({className:'', html:`<div class='badge'>${label||'UNK'}</div>`});
-  t.marker.setIcon(div);
-
-  if(hdg != null){
-    const [dx,dy] = headingArrow(hdg);
-    if(!t.arrow){ t.arrow = L.polyline([], {weight:2, dashArray:'4 4'}).addTo(t.layer); }
-    t.arrow.setLatLngs([[lat,lon],[lat+dy,lon+dx]]);
-  }
-
-  t.last = now;
-  trkcount.textContent = tracks.size;
-}
-
-function cull(){
-  const now = Date.now();
-  for(const [k,t] of tracks){
-    if(!t.last || now - t.last > 15000){ // 15s stale
-      if(t.layer) t.layer.remove();
-      tracks.delete(k);
-    }
-  }
-  trkcount.textContent = tracks.size;
-}
-setInterval(cull, 2000);
-
-function connect(){
-  const ws = new WebSocket('ws://'+location.hostname+':8765');
-  ws.onopen = ()=> wsstat.textContent = 'connected';
-  ws.onclose = ()=> { wsstat.textContent = 'disconnected'; setTimeout(connect, 1000); };
-  ws.onmessage = (ev)=>{
-    try{
-      const msg = JSON.parse(ev.data);
-      if(msg.type==='track') updateTrack(msg);
-      if(msg.type==='stats') console.log('Stats:', msg.data);
-    }catch(e){ console.error(e); }
-  };
-}
-connect();
-"""
-
-STYLE_CSS = """
-:root {
-  --primary: #0066cc;
-  --success: #28a745;
-  --danger: #dc3545;
-  --warning: #ffc107;
-  --dark: #1a1a1a;
-  --light: #f8f9fa;
-}
-
-* { box-sizing: border-box; }
-html, body { height: 100%; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-#map { height: 100%; }
-
-.panel {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  background: rgba(255, 255, 255, 0.95);
-  border-radius: 12px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.1);
-  padding: 12px 14px;
-  font-size: 12px;
-  line-height: 1.6;
-  min-width: 200px;
-  z-index: 1000;
-}
-
-.panel h1 {
-  font-size: 14px;
-  margin: 0 0 8px;
-  color: var(--dark);
-  font-weight: 600;
-}
-
-.panel-row {
-  display: flex;
-  justify-content: space-between;
-  padding: 4px 0;
-  color: #333;
-}
-
-.label { font-weight: 500; }
-.value { font-weight: 600; color: var(--primary); }
-
-.badge {
-  background: rgba(0, 0, 0, 0.7);
-  color: #fff;
-  padding: 2px 6px;
-  border-radius: 3px;
-  font-size: 11px;
-  line-height: 1.4;
-  white-space: nowrap;
-}
-
-.stats-panel {
-  position: absolute;
-  bottom: 8px;
-  right: 8px;
-  background: rgba(255, 255, 255, 0.95);
-  border-radius: 8px;
-  padding: 10px;
-  font-size: 11px;
-  min-width: 150px;
-}
-"""
 
 # ------------------------------ PCAP Reader --------------------------------
 PCAP_HDR = struct.Struct('>IHHiiii')
@@ -904,6 +801,12 @@ class PcapSource:
             if len(data) < incl:
                 break
             yield ts_sec + ts_usec/1e6, data
+
+    def close(self):
+        try:
+            self.f.close()
+        except Exception:
+            pass
 
 def _udp_payload(frame: bytes) -> Optional[bytes]:
     """Extract UDP payload from frame (IPv4 only, Ethernet or RAW)"""
@@ -953,39 +856,101 @@ async def main():
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument('--udp', help='UDP endpoint to bind (e.g., 0.0.0.0:31002)')
     g.add_argument('--pcap', help='PCAP file to replay')
-    
+
     ap.add_argument('--mcast', help='Multicast group to join (with --udp)')
     ap.add_argument('--speed', type=float, default=1.0, help='Playback speed (with --pcap)')
+    ap.add_argument('--loop', action='store_true', help='Replay the PCAP repeatedly (with --pcap)')
+    ap.add_argument('--http-port', type=int, default=DEFAULT_HTTP_PORT, help='HTTP/API port')
+    ap.add_argument('--ws-port', type=int, default=DEFAULT_WS_PORT, help='WebSocket port')
+    ap.add_argument('--bind', default=DEFAULT_BIND, help='Bind address for HTTP+WS')
+    ap.add_argument('--tile-url', default=os.environ.get('TILE_URL', DEFAULT_TILE_URL),
+                    help='Map tile URL template served to the client (or a local path)')
     ap.add_argument('--verbose', action='store_true', help='Enable debug logging')
-    
+
     args = ap.parse_args()
-    
+
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
-    
+
+    # Validate --udp early with a clear message rather than a raw traceback.
+    udp_target = None
+    if args.udp:
+        try:
+            host, port = args.udp.rsplit(':', 1)
+            udp_target = (host, int(port))
+        except ValueError:
+            ap.error("--udp must be HOST:PORT (e.g. 0.0.0.0:31002)")
+
     hub = WSHub()
     logger.info("Radar CAT62 Parser starting...")
-    
-    # Start WS server
-    import websockets
-    ws_task = asyncio.create_task(ws_server(hub))
-    
-    # HTTP server in thread
-    t = threading.Thread(target=run_http, args=(hub,), daemon=True)
-    t.start()
-    
-    # Source loop
+
+    stop_event = asyncio.Event()
+
+    # Cross-platform signal handling: prefer the loop's handlers, fall back to
+    # signal.signal (Windows has no add_signal_handler for SIGTERM).
+    loop = asyncio.get_running_loop()
+    # SIGBREAK covers the Windows console CTRL_BREAK / service-stop path.
+    for sig in (signal.SIGINT, getattr(signal, 'SIGTERM', None),
+                getattr(signal, 'SIGBREAK', None)):
+        if sig is None:
+            continue
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except (NotImplementedError, AttributeError, ValueError, RuntimeError):
+            try:
+                signal.signal(sig, lambda *_: stop_event.set())
+            except (ValueError, OSError, AttributeError):
+                pass
+
+    # Start the WebSocket server. A busy port degrades to "no WebSocket"
+    # rather than a silent dead task (the err.txt failure mode).
     try:
-        if args.udp:
-            host, port = args.udp.split(':')
-            port = int(port)
-            await udp_loop(hub, (host, port), args.mcast)
-        else:
-            await pcap_loop(hub, args.pcap, args.speed)
-    except KeyboardInterrupt:
-        logger.info("Shutdown requested")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
+        hub.ws_server_obj = await ws_server(hub, args.ws_port, args.bind)
+    except OSError as e:
+        logger.error(f"WebSocket unavailable on {args.bind}:{args.ws_port} ({e}); "
+                     f"continuing without live push")
+
+    # HTTP server in a daemon thread.
+    http_thread = threading.Thread(
+        target=run_http,
+        args=(hub, args.http_port, args.bind, args.ws_port, args.tile_url),
+        daemon=True,
+    )
+    http_thread.start()
+
+    # Ingest source, then idle-serve so the UI survives end-of-pcap.
+    async def run_source():
+        try:
+            if udp_target is not None:
+                await udp_loop(hub, udp_target, args.mcast, stop_event)
+            else:
+                await pcap_loop(hub, args.pcap, args.speed, args.loop, stop_event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Ingest error: {e}", exc_info=True)
+        if not stop_event.is_set():
+            await idle_serve(hub, stop_event)
+
+    source_task = asyncio.create_task(run_source())
+    stop_task = asyncio.create_task(stop_event.wait())
+    try:
+        await asyncio.wait({source_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        stop_event.set()
+        source_task.cancel()
+        stop_task.cancel()
+        await asyncio.gather(source_task, stop_task, return_exceptions=True)
+        # Tear down servers cleanly.
+        if hub.ws_server_obj is not None:
+            hub.ws_server_obj.close()
+            try:
+                await hub.ws_server_obj.wait_closed()
+            except Exception:
+                pass
+        if hub.httpd is not None:
+            hub.httpd.shutdown()
+        logger.info("Shutdown complete")
 
 if __name__ == '__main__':
     try:

@@ -113,6 +113,15 @@ html, body {
     width: 100%;
 }
 
+/* Offline basemap fallback (no tile server reachable): dark canvas for the
+   coordinate graticule drawn by app.js */
+#map.offline-basemap {
+    background: #0d1b2a;
+}
+#map.offline-basemap .leaflet-tile-pane {
+    display: none;
+}
+
 /* Control Panel */
 .control-panel {
     width: 350px;

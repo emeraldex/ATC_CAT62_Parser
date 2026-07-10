@@ -1,1 +1,3 @@
-websockets>=12.0
+# Runtime dependencies (pinned for reproducible deployments).
+# The parser targets Python 3.10+.
+websockets==16.1

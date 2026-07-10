@@ -1,10 +1,16 @@
 # Radar CAT62 Parser - Deployment Guide
 
+> ⚠️ **Non-operational tool.** Deploy on a trusted network for demo/training/dev
+> only. It is not certified for operational ATC and has no auth/TLS. See
+> **SCOPE & LIMITATIONS** in the [README](README.md). Some older details in this
+> guide (log-file paths, tunables) may be superseded — the README, `Dockerfile`,
+> `docker-compose.yml`, and `cat62-parser.service` are the source of truth.
+
 ## Prerequisites
 
-- Python 3.8+
+- Python 3.10+
 - pip/pip3
-- Network access to radar data source or PCAP files
+- Network access to radar data source or PCAP files (trusted network only)
 
 ## Installation
 
