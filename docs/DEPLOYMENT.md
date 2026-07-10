@@ -2,9 +2,10 @@
 
 > ⚠️ **Non-operational tool.** Deploy on a trusted network for demo/training/dev
 > only. It is not certified for operational ATC and has no auth/TLS. See
-> **SCOPE & LIMITATIONS** in the [README](README.md). Some older details in this
-> guide (log-file paths, tunables) may be superseded — the README, `Dockerfile`,
-> `docker-compose.yml`, and `cat62-parser.service` are the source of truth.
+> **SCOPE & LIMITATIONS** in the [README](../README.md). Some older details in
+> this guide (log-file paths, tunables) may be superseded — the README,
+> `deploy/Dockerfile`, `deploy/docker-compose.yml`, and
+> `deploy/cat62-parser.service` are the source of truth.
 
 ## Prerequisites
 

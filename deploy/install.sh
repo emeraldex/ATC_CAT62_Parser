@@ -3,6 +3,9 @@
 
 set -e
 
+# Run from the repo root regardless of where this script is invoked from.
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
 echo "================================"
 echo "CAT62 Parser Installation"
 echo "================================"
@@ -57,11 +60,11 @@ echo "2. Run parser: python parser_server.py --udp 0.0.0.0:31002"
 echo "3. Open browser: http://localhost:7878"
 echo ""
 echo "For systemd service:"
-echo "  sudo cp cat62-parser.service /etc/systemd/system/"
+echo "  sudo cp deploy/cat62-parser.service /etc/systemd/system/"
 echo "  sudo systemctl daemon-reload"
 echo "  sudo systemctl enable cat62-parser"
 echo "  sudo systemctl start cat62-parser"
 echo ""
 echo "For Docker:"
-echo "  docker-compose up -d"
+echo "  docker compose -f deploy/docker-compose.yml up -d"
 echo ""

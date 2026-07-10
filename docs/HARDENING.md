@@ -2,8 +2,9 @@
 
 This document records the robustness work done on top of the original
 prototype. Scope was **robustness only** — the ASTERIX decoder semantics were
-deliberately left unchanged (it remains matched to `generate_sample_data.py`,
-not the EUROCONTROL spec; see the SCOPE note in the README).
+deliberately left unchanged (it remains matched to
+`scripts/generate_sample_data.py`, not the EUROCONTROL spec; see the SCOPE note
+in the README).
 
 ## What changed
 

@@ -188,8 +188,10 @@ def generate_sample_pcap(output_file, num_packets=100):
 
 
 if __name__ == '__main__':
-    output = Path(__file__).parent / 'sample_radar.pcap'
+    samples_dir = Path(__file__).parent.parent / 'samples'
+    samples_dir.mkdir(exist_ok=True)
+    output = samples_dir / 'sample_radar.pcap'
     print(f"Generating sample PCAP file: {output}")
     generate_sample_pcap(str(output), num_packets=500)
     print(f"Generated {output.stat().st_size} bytes")
-    print(f"Usage: python parser_server.py --pcap sample_radar.pcap")
+    print(f"Usage: python parser_server.py --pcap samples/sample_radar.pcap")

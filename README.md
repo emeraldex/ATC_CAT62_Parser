@@ -15,8 +15,8 @@ replay, decodes tracks, and streams them to a browser client over WebSocket.
 > Specific technical limitations you must understand:
 >
 > - **The decoder is matched to this repo's own sample generator
->   (`generate_sample_data.py`), not to the real EUROCONTROL CAT62 UAP.** The
->   FSPEC/field ordering and LSB scaling are internally self-consistent for
+>   (`scripts/generate_sample_data.py`), not to the real EUROCONTROL CAT62
+>   UAP.** The FSPEC/field ordering and LSB scaling are internally self-consistent for
 >   synthetic data. **On a real radar feed it will mis-decode / desync.** Do not
 >   point it at live operational data and trust the output.
 > - **Only a few fields carry data:** I062/010 (SAC/SIC), I062/040 (track
@@ -25,8 +25,8 @@ replay, decodes tracks, and streams them to a browser client over WebSocket.
 > - No authentication, authorization, or TLS. Bind to a trusted network only.
 >
 > This pass hardened robustness (crash-safety, concurrency, lifecycle, offline
-> UI, tests) — see [HARDENING.md](HARDENING.md). It did **not** make the decoder
-> spec-compliant.
+> UI, tests) — see [docs/HARDENING.md](docs/HARDENING.md). It did **not** make
+> the decoder spec-compliant.
 
 ## Requirements
 
@@ -46,8 +46,8 @@ pip install -r requirements.txt
 Generate a sample capture, then replay it:
 
 ```bash
-python generate_sample_data.py            # writes sample_radar.pcap
-python parser_server.py --pcap sample_radar.pcap --loop
+python scripts/generate_sample_data.py       # writes samples/sample_radar.pcap
+python parser_server.py --pcap samples/sample_radar.pcap --loop
 ```
 
 Or listen on a UDP feed (synthetic sender that matches the generator):
@@ -102,20 +102,28 @@ python -m pytest
 
 The suite covers the decode round-trip (generator ↔ decoder), frame processing
 (including malformed and position-only records), the HTTP API, and the
-WSHub concurrency locking. See [TESTING_GUIDE.md](TESTING_GUIDE.md).
+WSHub concurrency locking. See [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md).
 
 ## Deployment
 
-`Dockerfile` + `docker-compose.yml` (Compose v2) build a non-root container with
-a real healthcheck; `cat62-parser.service` is a hardened systemd unit. Pin the
-runtime via `requirements.txt`. Again: **trusted networks only, non-operational
-use.**
+`deploy/Dockerfile` + `deploy/docker-compose.yml` (Compose v2) build a non-root
+container with a real healthcheck; `deploy/cat62-parser.service` is a hardened
+systemd unit. Pin the runtime via `requirements.txt`. Again: **trusted networks
+only, non-operational use.** See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Layout
 
 ```
-parser_server.py        # server: decoder, UDP/PCAP ingest, WS hub, HTTP API
-generate_sample_data.py # synthetic CAT62 PCAP generator (defines the decoder contract)
-client/                 # web UI (index.html, app.js, style.css, vendor/leaflet)
-tests/                  # pytest suite
+parser_server.py            # server: decoder, UDP/PCAP ingest, WS hub, HTTP API
+client/                      # web UI (index.html, app.js, style.css, vendor/leaflet)
+tests/                       # pytest suite
+scripts/
+  generate_sample_data.py    # synthetic CAT62 PCAP generator (defines the decoder contract)
+samples/
+  sample_radar.pcap          # pre-generated capture (regenerate via the script above)
+docs/                        # reference, deployment, hardening, and testing guides
+deploy/                      # Dockerfile, docker-compose.yml, systemd unit, install.sh
 ```
+
+See [docs/ASTERIX_REFERENCE.md](docs/ASTERIX_REFERENCE.md) for the field-level
+CAT62 reference.

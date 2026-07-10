@@ -2,8 +2,8 @@
 services:
   cat62-parser:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: deploy/Dockerfile
     container_name: cat62-parser
     restart: unless-stopped
 
@@ -32,7 +32,7 @@ services:
     # The client is baked into the image; mount it read-only only to override
     # in dev. (No /app/logs mount: the app logs to stdout -> the json-file driver.)
     volumes:
-      - ./client:/app/client:ro
+      - ../client:/app/client:ro
 
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:7878/api/health').status==200 else 1)"]

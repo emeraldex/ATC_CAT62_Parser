@@ -24,8 +24,8 @@ unit/integration tests — they do **not** require a running server or network.
 ## Manual / runtime checks
 
 ```bash
-python generate_sample_data.py
-python parser_server.py --pcap sample_radar.pcap --loop --verbose
+python scripts/generate_sample_data.py
+python parser_server.py --pcap samples/sample_radar.pcap --loop --verbose
 ```
 
 - **Web UI:** open http://localhost:7878 — markers should appear and move, the

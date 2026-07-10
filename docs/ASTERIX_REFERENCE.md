@@ -5,8 +5,8 @@
 > generator, **not** to the authoritative EUROCONTROL CAT62 UAP. Field ordering,
 > some item lengths, and LSB scaling here do **not** all match the real spec, and
 > only I062/010, I062/040, I062/105, and I062/185 actually carry decoded data.
-> See **SCOPE & LIMITATIONS** in the [README](README.md) before relying on this
-> for a real feed.
+> See **SCOPE & LIMITATIONS** in the [README](../README.md) before relying on
+> this for a real feed.
 
 ## Overview
 
