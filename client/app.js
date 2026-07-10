@@ -113,14 +113,14 @@ class RadarClient {
         };
 
         this.ws.onmessage = (event) => {
-            let data;
-            try {
-                data = JSON.parse(event.data);
-            } catch (e) {
-                console.error('Failed to parse message:', e);
+            // Server sends TEXT frames; tolerate a Blob/binary frame just in case.
+            if (typeof event.data !== 'string') {
+                if (event.data instanceof Blob) {
+                    event.data.text().then(t => this._dispatch(t));
+                }
                 return;
             }
-            this.handleMessage(data);
+            this._dispatch(event.data);
         };
 
         this.ws.onerror = () => {
@@ -132,6 +132,17 @@ class RadarClient {
             this.setConnectionStatus(false);
             setTimeout(() => this.connect(), RECONNECT_MS);
         };
+    }
+
+    _dispatch(text) {
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch (e) {
+            console.error('Failed to parse message:', e);
+            return;
+        }
+        this.handleMessage(data);
     }
 
     handleMessage(data) {

@@ -391,14 +391,18 @@ class WSHub:
             n = len(self.clients)
         logger.debug(f"WebSocket client disconnected. Total: {n}")
 
-    async def broadcast(self, msg_bytes):
-        """Broadcast message to all connected clients."""
+    async def broadcast(self, message):
+        """Broadcast a message to all connected clients.
+
+        `message` must be a str so websockets emits a TEXT frame -- browsers
+        deliver binary frames as a Blob, which breaks JSON.parse on the client.
+        """
         with self._lock:
             targets = list(self.clients)
         dead = []
         for ws in targets:
             try:
-                await ws.send(msg_bytes)
+                await ws.send(message)
             except Exception as e:
                 logger.debug(f"Broadcast error: {e}")
                 dead.append(ws)
@@ -408,8 +412,8 @@ class WSHub:
                     self.clients.discard(ws)
 
     async def broadcast_json(self, msg_dict):
-        """Broadcast JSON message"""
-        await self.broadcast(json.dumps(msg_dict).encode('utf-8'))
+        """Broadcast a JSON message as a WebSocket TEXT frame."""
+        await self.broadcast(json.dumps(msg_dict))
 
     def update_track(self, track_id: str, data: Dict):
         """Update or create track (event-loop side; holds the lock briefly)."""
